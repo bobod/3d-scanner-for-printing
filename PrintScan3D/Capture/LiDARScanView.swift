@@ -32,7 +32,7 @@ struct LiDARScanView: View {
         .alert("Nothing inside the box", isPresented: $emptyResult) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text("Scan around the object until the mesh covers it, and make sure the box surrounds it.")
+            Text("Scan around the object until the mesh covers it, and make sure the box surrounds it. Objects smaller than about 15 cm are too small for LiDAR Quick Scan; use Object Capture instead.")
         }
     }
 
@@ -62,6 +62,9 @@ struct LiDARScanView: View {
             return scanner.meshAnchorCount == 0
                 ? "Move slowly to start mapping the area."
                 : "Tap your object to place the scan box around it."
+        }
+        if scanner.boxIsTooSmallForLiDAR {
+            return "This object is small for LiDAR Quick Scan, which only captures shapes about 15 cm and larger. Use Object Capture for small objects."
         }
         return "Walk around the object until the mesh covers every side, then tap Capture."
     }

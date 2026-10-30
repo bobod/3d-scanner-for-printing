@@ -43,6 +43,8 @@ Unit tests for the mesh pipeline (hole filling, base cut, welding, unit conversi
 
 - Use diffuse, even light, and put the object on a plain, non-reflective surface with some space around it.
 - Shiny, transparent or very thin objects scan poorly with photogrammetry.
+- **Small objects** (under about 15 cm) need **Object Capture**. LiDAR Quick Scan meshes the room at a resolution of a few centimeters, so small objects come out as blobs. For small items, put them on a textured, non-reflective surface (a newspaper or patterned cloth works well), fill most of the frame, and move slowly.
+- If Object Capture stays on "Starting LiDAR and camera…", check that camera access is allowed in Settings, close other camera/AR apps, and tap **Restart Camera**.
 - A 1–2 mm **flat base cut** helps scanned objects stick to the bed.
 - 3MF stores millimeter units explicitly. STL has no units, but every slicer assumes millimeters, which is what the app writes.
 

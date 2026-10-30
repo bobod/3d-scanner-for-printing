@@ -104,7 +104,15 @@ final class LiDARScanner: NSObject, ObservableObject {
 
     // MARK: Mesh extraction
 
-    /// Collects every LiDAR mesh triangle fully inside the box, in world
+    /// LiDAR scene-mesh triangles are several centimeters across, so objects
+    /// smaller than this come out as shapeless blobs.
+    static let minimumUsefulObjectSize: Float = 0.15
+
+    var boxIsTooSmallForLiDAR: Bool {
+        boxSize.max() < Self.minimumUsefulObjectSize
+    }
+
+    /// Collects every LiDAR mesh triangle whose center lies inside the box, in world
     /// space (meters, Y up). The box bottom sits just above the support
     /// surface so the floor is excluded and the base is left open for the
     /// print pipeline to cap.
@@ -122,15 +130,12 @@ final class LiDARScanner: NSObject, ObservableObject {
             guard faces.indexCountPerPrimitive == 3 else { continue }
 
             var world = [SIMD3<Float>](repeating: .zero, count: vertices.count)
-            var inside = [Bool](repeating: false, count: vertices.count)
             let vertexPointer = vertices.buffer.contents()
             for i in 0..<vertices.count {
                 let p = vertexPointer.advanced(by: vertices.offset + vertices.stride * i)
                     .assumingMemoryBound(to: Float.self)
                 let w = anchor.transform * SIMD4<Float>(p[0], p[1], p[2], 1)
-                let v = SIMD3(w.x, w.y, w.z)
-                world[i] = v
-                inside[i] = all(v .>= lo) && all(v .<= hi)
+                world[i] = SIMD3(w.x, w.y, w.z)
             }
 
             var remap = [UInt32](repeating: .max, count: vertices.count)
@@ -143,7 +148,10 @@ final class LiDARScanner: NSObject, ObservableObject {
                         ? indexPointer.load(fromByteOffset: offset, as: UInt32.self)
                         : UInt32(indexPointer.load(fromByteOffset: offset, as: UInt16.self))
                 }
-                guard inside[Int(ids.x)], inside[Int(ids.y)], inside[Int(ids.z)] else { continue }
+                // Testing the centroid (rather than requiring all three corners
+                // inside) keeps the coarse triangles that cover small objects.
+                let centroid = (world[Int(ids.x)] + world[Int(ids.y)] + world[Int(ids.z)]) / 3
+                guard all(centroid .>= lo), all(centroid .<= hi) else { continue }
                 for k in 0..<3 where remap[Int(ids[k])] == .max {
                     remap[Int(ids[k])] = UInt32(mesh.vertices.count)
                     mesh.vertices.append(world[Int(ids[k])])

@@ -51,6 +51,7 @@ struct ObjectCaptureFlowView: View {
                         .ignoresSafeArea()
                 } else {
                     ObjectCaptureView(session: session)
+                        .id(ObjectIdentifier(session)) // fresh view after Restart Camera
                         .ignoresSafeArea()
                 }
 
@@ -87,7 +88,20 @@ struct ObjectCaptureFlowView: View {
                         .background(.ultraThinMaterial, in: Capsule())
                 }
             }
-            if let message = controller.feedback.first ?? instruction {
+            if controller.initializationStalled {
+                VStack(spacing: 8) {
+                    Text("The camera is taking longer than usual to start.")
+                        .font(.callout.weight(.medium))
+                    Text("Close other camera or AR apps, make sure the phone isn't hot, then restart.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    Button("Restart Camera", systemImage: "arrow.clockwise") { controller.restart() }
+                        .buttonStyle(.borderedProminent)
+                }
+                .multilineTextAlignment(.center)
+                .padding(14)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+            } else if let message = controller.feedback.first ?? instruction {
                 Text(message)
                     .font(.callout.weight(.medium))
                     .multilineTextAlignment(.center)
@@ -101,8 +115,8 @@ struct ObjectCaptureFlowView: View {
     private var instruction: String? {
         switch controller.captureState {
         case .initializing: return "Starting LiDAR and camera…"
-        case .ready: return "Point at your object and tap Continue."
-        case .detecting: return "Adjust the box to fit the object, then start capturing."
+        case .ready: return "Center the object in the frame and tap Continue. For small objects, use a textured, non-reflective surface and fill most of the frame."
+        case .detecting: return "Adjust the box to fit the object, then start capturing. If no box appears, move a little closer or farther away."
         case .capturing: return "Walk slowly around the object, keeping it in view."
         case .finishing: return "Finishing capture…"
         default: return nil

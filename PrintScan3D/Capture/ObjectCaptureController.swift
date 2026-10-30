@@ -1,4 +1,5 @@
 #if !targetEnvironment(simulator)
+import AVFoundation
 import Foundation
 import RealityKit
 // ObjectCaptureSession is declared in RealityKit's SwiftUI cross-import
@@ -32,6 +33,8 @@ final class ObjectCaptureController: ObservableObject {
     @Published private(set) var scanPasses = 1
     @Published private(set) var progress: Double = 0
     @Published private(set) var progressMessage = "Preparing…"
+    /// Set when the session sits in `.initializing` for too long.
+    @Published private(set) var initializationStalled = false
 
     let scanID: UUID
     let workspace: URL
@@ -43,6 +46,8 @@ final class ObjectCaptureController: ObservableObject {
     private var reconstructionTask: Task<Void, Never>?
     private var photogrammetry: PhotogrammetrySession?
     private var pollTimer: Timer?
+    private var startedAt = Date()
+    private var isCancelled = false
 
     init(scanID: UUID, workspace: URL) {
         self.scanID = scanID
@@ -53,17 +58,58 @@ final class ObjectCaptureController: ObservableObject {
 
     func start() {
         guard session == nil else { return }
+        Task {
+            // Object Capture does not reliably prompt for camera access itself;
+            // without it the session never leaves `.initializing`.
+            let granted = await Self.requestCameraAccess()
+            guard !isCancelled else { return }
+            guard granted else {
+                phase = .failed("Camera access is turned off. Enable it in Settings → Privacy & Security → Camera → PrintScan 3D.")
+                return
+            }
+            startSession()
+        }
+    }
+
+    /// Throws away the current session and images and starts over.
+    func restart() {
+        session?.cancel()
+        tearDownCapture()
+        try? FileManager.default.removeItem(at: imagesURL)
+        try? FileManager.default.removeItem(at: checkpointURL)
+        captureState = .initializing
+        feedback = []
+        userCompletedScanPass = false
+        scanPasses = 1
+        start()
+    }
+
+    private static func requestCameraAccess() async -> Bool {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized: return true
+        case .notDetermined: return await AVCaptureDevice.requestAccess(for: .video)
+        default: return false
+        }
+    }
+
+    private func startSession() {
+        guard session == nil else { return }
         let fileManager = FileManager.default
+        // The images folder must be empty when the session starts.
+        try? fileManager.removeItem(at: imagesURL)
         try? fileManager.createDirectory(at: imagesURL, withIntermediateDirectories: true)
         try? fileManager.createDirectory(at: checkpointURL, withIntermediateDirectories: true)
 
         var configuration = ObjectCaptureSession.Configuration()
         configuration.checkpointDirectory = checkpointURL
-        configuration.isOverCaptureEnabled = true
+        // Over-capture images are only used by macOS reconstruction.
+        configuration.isOverCaptureEnabled = false
 
         let session = ObjectCaptureSession()
         session.start(imagesDirectory: imagesURL, configuration: configuration)
         self.session = session
+        startedAt = Date()
+        initializationStalled = false
         UIApplication.shared.isIdleTimerDisabled = true
 
         captureTasks.append(Task { [weak self] in
@@ -79,10 +125,22 @@ final class ObjectCaptureController: ObservableObject {
             }
         })
 
-        // Counters are plain properties; sample them for the HUD.
+        // Also sample the session directly: a state change that happens
+        // before `stateUpdates` is subscribed would otherwise be missed and
+        // the UI would stay on "Starting…" forever.
         pollTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, let session = self.session else { return }
+                let state = session.state
+                if Self.key(for: state) != Self.key(for: self.captureState) {
+                    self.handle(state)
+                }
+                if case .initializing = self.captureState {
+                    self.initializationStalled = Date().timeIntervalSince(self.startedAt) > 10
+                } else if self.initializationStalled {
+                    self.initializationStalled = false
+                }
+                guard self.session != nil else { return }
                 self.shotsTaken = session.numberOfShotsTaken
                 self.maximumShots = session.maximumNumberOfInputImages
                 if self.userCompletedScanPass != session.userCompletedScanPass {
@@ -120,6 +178,7 @@ final class ObjectCaptureController: ObservableObject {
     }
 
     func cancel() {
+        isCancelled = true
         session?.cancel()
         tearDownCapture()
         photogrammetry?.cancel()
@@ -128,6 +187,8 @@ final class ObjectCaptureController: ObservableObject {
     }
 
     private func handle(_ state: ObjectCaptureSession.CaptureState) {
+        // Updates arrive from both the async sequence and the poll timer.
+        guard case .capturing = phase, Self.key(for: state) != Self.key(for: captureState) else { return }
         captureState = state
         switch state {
         case .completed:
@@ -141,6 +202,19 @@ final class ObjectCaptureController: ObservableObject {
             phase = .failed(error.localizedDescription)
         default:
             break
+        }
+    }
+
+    private static func key(for state: ObjectCaptureSession.CaptureState) -> String {
+        switch state {
+        case .initializing: return "initializing"
+        case .ready: return "ready"
+        case .detecting: return "detecting"
+        case .capturing: return "capturing"
+        case .finishing: return "finishing"
+        case .completed: return "completed"
+        case .failed: return "failed"
+        @unknown default: return "unknown"
         }
     }
 

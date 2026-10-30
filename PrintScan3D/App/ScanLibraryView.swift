@@ -98,7 +98,7 @@ struct ScanLibraryView: View {
                 capture = .lidar
             } label: {
                 Label("LiDAR Quick Scan", systemImage: "sensor.fill")
-                Text("Instant mesh, good for larger objects")
+                Text("Instant, low detail. Objects 15 cm and up")
             }
             .disabled(!LiDARScanner.isSupported)
 
