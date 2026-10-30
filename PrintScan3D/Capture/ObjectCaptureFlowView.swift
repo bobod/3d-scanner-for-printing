@@ -1,0 +1,189 @@
+#if !targetEnvironment(simulator)
+import RealityKit
+import SwiftUI
+
+/// Full-screen guided capture: detect the object, orbit it (optionally
+/// flipping it for the underside), then reconstruct on device.
+struct ObjectCaptureFlowView: View {
+    @StateObject private var controller: ObjectCaptureController
+    let onFinish: () -> Void
+    let onCancel: () -> Void
+
+    init(scanID: UUID, workspace: URL, onFinish: @escaping () -> Void, onCancel: @escaping () -> Void) {
+        _controller = StateObject(wrappedValue: ObjectCaptureController(scanID: scanID, workspace: workspace))
+        self.onFinish = onFinish
+        self.onCancel = onCancel
+    }
+
+    var body: some View {
+        Group {
+            switch controller.phase {
+            case .capturing:
+                captureView
+            case .reconstructing:
+                ReconstructionProgressView(progress: controller.progress, message: controller.progressMessage) {
+                    controller.cancel()
+                    onCancel()
+                }
+            case .finished:
+                ProgressView("Saving…")
+                    .onAppear(perform: onFinish)
+            case .failed(let message):
+                ContentUnavailableView {
+                    Label("Scan failed", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(message)
+                } actions: {
+                    Button("Close", action: onCancel)
+                        .buttonStyle(.borderedProminent)
+                }
+            }
+        }
+        .onAppear { controller.start() }
+    }
+
+    @ViewBuilder
+    private var captureView: some View {
+        if let session = controller.session {
+            ZStack {
+                if controller.userCompletedScanPass {
+                    ObjectCapturePointCloudView(session: session)
+                        .ignoresSafeArea()
+                } else {
+                    ObjectCaptureView(session: session)
+                        .ignoresSafeArea()
+                }
+
+                VStack(spacing: 12) {
+                    topBar
+                    Spacer()
+                    if controller.userCompletedScanPass {
+                        passCompletePanel
+                    } else {
+                        bottomControls
+                    }
+                }
+                .padding()
+            }
+        } else {
+            ProgressView("Starting camera…")
+        }
+    }
+
+    private var topBar: some View {
+        VStack(spacing: 8) {
+            HStack {
+                Button("Cancel") {
+                    controller.cancel()
+                    onCancel()
+                }
+                .buttonStyle(.bordered)
+                Spacer()
+                if case .capturing = controller.captureState {
+                    Text("Pass \(controller.scanPasses) · \(controller.shotsTaken)/\(controller.maximumShots) photos")
+                        .font(.footnote.monospacedDigit())
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(.ultraThinMaterial, in: Capsule())
+                }
+            }
+            if let message = controller.feedback.first ?? instruction {
+                Text(message)
+                    .font(.callout.weight(.medium))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+            }
+        }
+    }
+
+    private var instruction: String? {
+        switch controller.captureState {
+        case .initializing: return "Starting LiDAR and camera…"
+        case .ready: return "Point at your object and tap Continue."
+        case .detecting: return "Adjust the box to fit the object, then start capturing."
+        case .capturing: return "Walk slowly around the object, keeping it in view."
+        case .finishing: return "Finishing capture…"
+        default: return nil
+        }
+    }
+
+    @ViewBuilder
+    private var bottomControls: some View {
+        switch controller.captureState {
+        case .ready:
+            primaryButton("Continue", systemImage: "viewfinder") { controller.startDetecting() }
+        case .detecting:
+            HStack {
+                Button("Reset Box") { controller.resetDetection() }
+                    .buttonStyle(.bordered)
+                primaryButton("Start Capture", systemImage: "camera.fill") { controller.startCapturing() }
+            }
+        case .capturing:
+            primaryButton("Finish Early", systemImage: "checkmark") { controller.finishCapture() }
+                .disabled(controller.shotsTaken < 10)
+        default:
+            EmptyView()
+        }
+    }
+
+    private var passCompletePanel: some View {
+        VStack(spacing: 10) {
+            Text("Scan pass \(controller.scanPasses) complete")
+                .font(.headline)
+            Text("For a closed, printable model, flip the object over and scan its underside too.")
+                .font(.footnote)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+            HStack {
+                Button("Flip Object") { controller.beginNewPass(flipped: true) }
+                    .buttonStyle(.bordered)
+                Button("Same Side") { controller.beginNewPass(flipped: false) }
+                    .buttonStyle(.bordered)
+            }
+            primaryButton("Process Model", systemImage: "cube.fill") { controller.finishCapture() }
+        }
+        .padding()
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
+    }
+
+    private func primaryButton(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
+                .font(.headline)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
+        }
+        .buttonStyle(.borderedProminent)
+    }
+}
+
+struct ReconstructionProgressView: View {
+    let progress: Double
+    let message: String
+    let onCancel: () -> Void
+
+    var body: some View {
+        VStack(spacing: 24) {
+            Image(systemName: "cube.transparent")
+                .font(.system(size: 64))
+                .foregroundStyle(.tint)
+                .symbolEffect(.pulse)
+            Text("Reconstructing your model")
+                .font(.title2.bold())
+            ProgressView(value: progress)
+                .padding(.horizontal, 40)
+            Text("\(message) \(Int(progress * 100))%")
+                .font(.callout.monospacedDigit())
+                .foregroundStyle(.secondary)
+            Text("Keep the app open. This usually takes a few minutes.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Button("Cancel", role: .cancel, action: onCancel)
+                .buttonStyle(.bordered)
+        }
+        .padding()
+    }
+}
+#endif
