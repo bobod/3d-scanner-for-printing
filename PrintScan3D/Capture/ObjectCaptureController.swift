@@ -1,6 +1,7 @@
 #if !targetEnvironment(simulator)
 import AVFoundation
 import Foundation
+import OSLog
 import RealityKit
 // ObjectCaptureSession is declared in RealityKit's SwiftUI cross-import
 // overlay, which only loads when both modules are imported.
@@ -9,6 +10,8 @@ import UIKit
 
 /// Runs Apple's guided Object Capture (LiDAR-assisted image capture) and
 /// then on-device photogrammetry to produce a textured USDZ model.
+private let log = Logger(subsystem: "PrintScan3D", category: "ObjectCapture")
+
 @MainActor
 final class ObjectCaptureController: ObservableObject {
 
@@ -46,7 +49,6 @@ final class ObjectCaptureController: ObservableObject {
     private var reconstructionTask: Task<Void, Never>?
     private var photogrammetry: PhotogrammetrySession?
     private var pollTimer: Timer?
-    private var startedAt = Date()
     private var isCancelled = false
 
     init(scanID: UUID, workspace: URL) {
@@ -108,9 +110,10 @@ final class ObjectCaptureController: ObservableObject {
         let session = ObjectCaptureSession()
         session.start(imagesDirectory: imagesURL, configuration: configuration)
         self.session = session
-        startedAt = Date()
         initializationStalled = false
         UIApplication.shared.isIdleTimerDisabled = true
+
+        log.info("Session started")
 
         captureTasks.append(Task { [weak self] in
             for await state in session.stateUpdates {
@@ -127,24 +130,34 @@ final class ObjectCaptureController: ObservableObject {
             }
         })
 
-        // Also sample the session directly: a state change that happens
-        // before `stateUpdates` is subscribed would otherwise be missed and
-        // the UI would stay on "Starting…" forever.
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in
+        // Pick up a state change that happened before `stateUpdates` was
+        // subscribed. This is a one-off read: polling the session on the
+        // main thread during detection can stall the UI.
+        handle(session.state)
+
+        // One-shot check instead of polling: offer a restart if the camera
+        // never comes up.
+        let startedSession = session
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
+            guard let self, self.session === startedSession else { return }
+            if case .initializing = self.captureState {
+                log.error("Session still initializing after 10 s")
+                self.initializationStalled = true
+            }
+        }
+    }
+
+    /// Photo count and pass completion only matter while capturing, so they
+    /// are sampled (once a second) only in that state.
+    private func updateCaptureCounters(active: Bool) {
+        pollTimer?.invalidate()
+        pollTimer = nil
+        guard active else { return }
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, let session = self.session else { return }
-                let state = session.state
-                if Self.key(for: state) != Self.key(for: self.captureState) {
-                    self.handle(state)
-                }
                 // Only assign changed values: every @Published assignment
                 // re-renders the capture screen, even if the value is equal.
-                var stalled = false
-                if case .initializing = self.captureState {
-                    stalled = Date().timeIntervalSince(self.startedAt) > 10
-                }
-                if self.initializationStalled != stalled { self.initializationStalled = stalled }
-                guard self.session != nil else { return }
                 if self.shotsTaken != session.numberOfShotsTaken { self.shotsTaken = session.numberOfShotsTaken }
                 if self.maximumShots != session.maximumNumberOfInputImages {
                     self.maximumShots = session.maximumNumberOfInputImages
@@ -193,9 +206,16 @@ final class ObjectCaptureController: ObservableObject {
     }
 
     private func handle(_ state: ObjectCaptureSession.CaptureState) {
-        // Updates arrive from both the async sequence and the poll timer.
+        // Updates arrive from both the async sequence and the initial read.
         guard case .capturing = phase, Self.key(for: state) != Self.key(for: captureState) else { return }
+        log.info("State: \(Self.key(for: self.captureState)) -> \(Self.key(for: state))")
         captureState = state
+        if initializationStalled, Self.key(for: state) != "initializing" { initializationStalled = false }
+        if case .capturing = state {
+            updateCaptureCounters(active: true)
+        } else {
+            updateCaptureCounters(active: false)
+        }
         switch state {
         case .completed:
             // The capture session must be released before photogrammetry
@@ -204,6 +224,7 @@ final class ObjectCaptureController: ObservableObject {
             phase = .reconstructing
             reconstructionTask = Task { [weak self] in await self?.reconstruct() }
         case .failed(let error):
+            log.error("Capture failed: \(error.localizedDescription)")
             tearDownCapture()
             phase = .failed(error.localizedDescription)
         default:
