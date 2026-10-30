@@ -99,7 +99,7 @@ struct ObjectCaptureFlowView: View {
                 .multilineTextAlignment(.center)
                 .padding(14)
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
-            } else if let message = controller.feedback.first ?? instruction {
+            } else if let message = visibleFeedback.first ?? instruction {
                 Text(message)
                     .font(.callout.weight(.medium))
                     .multilineTextAlignment(.center)
@@ -107,6 +107,19 @@ struct ObjectCaptureFlowView: View {
                     .padding(.vertical, 10)
                     .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
             }
+        }
+    }
+
+    /// Object Capture reports feedback such as "low light" while the
+    /// camera is still adjusting, so it is only shown once scanning starts.
+    private var visibleFeedback: [String] {
+        switch controller.captureState {
+        case .capturing:
+            return controller.feedback
+        case .detecting:
+            return controller.feedback.filter { !ObjectCaptureController.lightingMessages.contains($0) }
+        default:
+            return []
         }
     }
 

@@ -1,6 +1,7 @@
 #if !targetEnvironment(simulator)
 import AVFoundation
 import Foundation
+import Observation
 import OSLog
 import RealityKit
 // ObjectCaptureSession is declared in RealityKit's SwiftUI cross-import
@@ -48,7 +49,13 @@ final class ObjectCaptureController: ObservableObject {
     private var captureTasks: [Task<Void, Never>] = []
     private var reconstructionTask: Task<Void, Never>?
     private var photogrammetry: PhotogrammetrySession?
+    /// Samples photo count / pass completion while capturing.
     private var pollTimer: Timer?
+    /// Samples `session.state`; see `startStateWatch`.
+    private var stateTimer: Timer?
+    /// Set after we ask the session to change state, so the state watch
+    /// keeps sampling even during detection until the change arrives.
+    private var awaitingTransition = false
     private var isCancelled = false
 
     init(scanID: UUID, workspace: URL) {
@@ -108,15 +115,14 @@ final class ObjectCaptureController: ObservableObject {
         configuration.isOverCaptureEnabled = false
 
         let session = ObjectCaptureSession()
-        session.start(imagesDirectory: imagesURL, configuration: configuration)
         self.session = session
         initializationStalled = false
         UIApplication.shared.isIdleTimerDisabled = true
 
-        log.info("Session started")
-
+        // Subscribe before starting, as Apple's sample does.
         captureTasks.append(Task { [weak self] in
             for await state in session.stateUpdates {
+                log.debug("stateUpdates yielded \(Self.key(for: state))")
                 self?.handle(state)
                 if case .completed = state { break }
                 if case .failed = state { break }
@@ -130,19 +136,47 @@ final class ObjectCaptureController: ObservableObject {
             }
         })
 
-        // Pick up a state change that happened before `stateUpdates` was
-        // subscribed. This is a one-off read: polling the session on the
-        // main thread during detection can stall the UI.
-        handle(session.state)
+        session.start(imagesDirectory: imagesURL, configuration: configuration)
+        log.info("Session started")
 
-        // One-shot check instead of polling: offer a restart if the camera
-        // never comes up.
-        let startedSession = session
-        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
-            guard let self, self.session === startedSession else { return }
+        observeState(of: session)
+        startStateWatch(for: session)
+
+        // Offer a restart if the camera never comes up.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
+            guard let self, self.session === session else { return }
             if case .initializing = self.captureState {
-                log.error("Session still initializing after 10 s")
+                log.error("Session still initializing after 15 s")
                 self.initializationStalled = true
+            }
+        }
+    }
+
+    /// Fires when the session's `state` changes if the session supports
+    /// Swift Observation; otherwise it simply never fires.
+    private func observeState(of session: ObjectCaptureSession) {
+        withObservationTracking {
+            _ = session.state
+        } onChange: { [weak self] in
+            Task { @MainActor in
+                guard let self, self.session === session else { return }
+                self.handle(session.state)
+                self.observeState(of: session)
+            }
+        }
+    }
+
+    /// On some devices `stateUpdates` never yields, so the state is also
+    /// sampled directly. Only `state` is read, and sampling pauses while the
+    /// user adjusts the bounding box (heavy work inside Object Capture)
+    /// unless we are waiting for a state change we requested.
+    private func startStateWatch(for session: ObjectCaptureSession) {
+        stateTimer?.invalidate()
+        stateTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.session === session else { return }
+                if case .detecting = self.captureState, !self.awaitingTransition { return }
+                self.handle(session.state)
             }
         }
     }
@@ -170,15 +204,26 @@ final class ObjectCaptureController: ObservableObject {
     }
 
     func startDetecting() {
-        _ = session?.startDetecting()
+        guard let session else { return }
+        awaitingTransition = true
+        let started = session.startDetecting()
+        log.info("startDetecting() returned \(started)")
+        handle(session.state)
     }
 
     func resetDetection() {
-        session?.resetDetection()
+        guard let session else { return }
+        awaitingTransition = true
+        session.resetDetection()
+        handle(session.state)
     }
 
     func startCapturing() {
-        session?.startCapturing()
+        guard let session else { return }
+        awaitingTransition = true
+        session.startCapturing()
+        log.info("startCapturing() called")
+        handle(session.state)
     }
 
     func beginNewPass(flipped: Bool) {
@@ -193,6 +238,7 @@ final class ObjectCaptureController: ObservableObject {
     }
 
     func finishCapture() {
+        awaitingTransition = true
         session?.finish()
     }
 
@@ -206,8 +252,9 @@ final class ObjectCaptureController: ObservableObject {
     }
 
     private func handle(_ state: ObjectCaptureSession.CaptureState) {
-        // Updates arrive from both the async sequence and the initial read.
+        // Updates arrive from several sources; act on each change once.
         guard case .capturing = phase, Self.key(for: state) != Self.key(for: captureState) else { return }
+        awaitingTransition = false
         log.info("State: \(Self.key(for: self.captureState)) -> \(Self.key(for: state))")
         captureState = state
         if initializationStalled, Self.key(for: state) != "initializing" { initializationStalled = false }
@@ -248,6 +295,9 @@ final class ObjectCaptureController: ObservableObject {
     private func tearDownCapture() {
         pollTimer?.invalidate()
         pollTimer = nil
+        stateTimer?.invalidate()
+        stateTimer = nil
+        awaitingTransition = false
         captureTasks.forEach { $0.cancel() }
         captureTasks.removeAll()
         session = nil
@@ -299,14 +349,16 @@ final class ObjectCaptureController: ObservableObject {
 
     // MARK: Feedback
 
+    static let lightingMessages = ["More light needed", "It's too dark"]
+
     private static func messages(for feedback: Set<ObjectCaptureSession.Feedback>) -> [String] {
         feedback.compactMap { item in
             switch item {
             case .objectTooClose: return "Move farther away"
             case .objectTooFar: return "Move closer"
             case .movingTooFast: return "Move slower"
-            case .environmentLowLight: return "More light needed"
-            case .environmentTooDark: return "It's too dark"
+            case .environmentLowLight: return lightingMessages[0]
+            case .environmentTooDark: return lightingMessages[1]
             case .outOfFieldOfView: return "Aim at the object"
             case .objectNotFlippable: return "This object can't be flipped"
             case .overCapturing: return "Enough images here — move on"
