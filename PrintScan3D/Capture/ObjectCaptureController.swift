@@ -1,6 +1,9 @@
 #if !targetEnvironment(simulator)
 import Foundation
 import RealityKit
+// ObjectCaptureSession is declared in RealityKit's SwiftUI cross-import
+// overlay, which only loads when both modules are imported.
+import SwiftUI
 import UIKit
 
 /// Runs Apple's guided Object Capture (LiDAR-assisted image capture) and
