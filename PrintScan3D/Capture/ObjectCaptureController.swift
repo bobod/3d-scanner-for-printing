@@ -121,7 +121,9 @@ final class ObjectCaptureController: ObservableObject {
         })
         captureTasks.append(Task { [weak self] in
             for await feedback in session.feedbackUpdates {
-                self?.feedback = Self.messages(for: feedback)
+                guard let self else { return }
+                let messages = Self.messages(for: feedback)
+                if self.feedback != messages { self.feedback = messages }
             }
         })
 
@@ -135,14 +137,18 @@ final class ObjectCaptureController: ObservableObject {
                 if Self.key(for: state) != Self.key(for: self.captureState) {
                     self.handle(state)
                 }
+                // Only assign changed values: every @Published assignment
+                // re-renders the capture screen, even if the value is equal.
+                var stalled = false
                 if case .initializing = self.captureState {
-                    self.initializationStalled = Date().timeIntervalSince(self.startedAt) > 10
-                } else if self.initializationStalled {
-                    self.initializationStalled = false
+                    stalled = Date().timeIntervalSince(self.startedAt) > 10
                 }
+                if self.initializationStalled != stalled { self.initializationStalled = stalled }
                 guard self.session != nil else { return }
-                self.shotsTaken = session.numberOfShotsTaken
-                self.maximumShots = session.maximumNumberOfInputImages
+                if self.shotsTaken != session.numberOfShotsTaken { self.shotsTaken = session.numberOfShotsTaken }
+                if self.maximumShots != session.maximumNumberOfInputImages {
+                    self.maximumShots = session.maximumNumberOfInputImages
+                }
                 if self.userCompletedScanPass != session.userCompletedScanPass {
                     self.userCompletedScanPass = session.userCompletedScanPass
                 }

@@ -46,14 +46,12 @@ struct ObjectCaptureFlowView: View {
     private var captureView: some View {
         if let session = controller.session {
             ZStack {
-                if controller.userCompletedScanPass {
-                    ObjectCapturePointCloudView(session: session)
-                        .ignoresSafeArea()
-                } else {
-                    ObjectCaptureView(session: session)
-                        .id(ObjectIdentifier(session)) // fresh view after Restart Camera
-                        .ignoresSafeArea()
-                }
+                // Equatable so HUD updates (photo count, feedback) never
+                // re-render Apple's camera view; it can freeze when redrawn often.
+                CaptureCameraView(session: session, showPointCloud: controller.userCompletedScanPass)
+                    .equatable()
+                    .id(ObjectIdentifier(session)) // fresh view after Restart Camera
+                    .ignoresSafeArea()
 
                 VStack(spacing: 12) {
                     topBar
@@ -170,6 +168,23 @@ struct ObjectCaptureFlowView: View {
                 .padding(.vertical, 6)
         }
         .buttonStyle(.borderedProminent)
+    }
+}
+
+private struct CaptureCameraView: View, Equatable {
+    let session: ObjectCaptureSession
+    let showPointCloud: Bool
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.session === rhs.session && lhs.showPointCloud == rhs.showPointCloud
+    }
+
+    var body: some View {
+        if showPointCloud {
+            ObjectCapturePointCloudView(session: session)
+        } else {
+            ObjectCaptureView(session: session)
+        }
     }
 }
 
